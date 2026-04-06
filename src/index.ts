@@ -525,25 +525,43 @@ async function initMemvid(): Promise<string | null> {
 }
 
 // ============================================================================
-// MCP Server
+// MCP Server Setup (will be initialized in main())
 // ============================================================================
 
-const server = new Server(
-  {
-    name: "mcp-memvid-server",
-    version: "2.0.0",
-  },
-  {
-    capabilities: {
-      tools: {},
-      prompts: {},
-    },
-  }
-);
+let server: Server | null = null;
+let startupInfoContent: string = "";
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
+function setupServer(startupInfo: string): Server {
+  const srv = new Server(
+    {
+      name: "mcp-memvid-server",
+      version: "2.0.0",
+    },
+    {
+      capabilities: {
+        tools: {},
+        prompts: {},
+      },
+      // Include startup info in instructions - this will be added to system prompt
+      instructions: `# MCP Memvid - 上下文和用户偏好
+
+${startupInfo}
+
+## 可用工具
+- lcm_status: 查看当前上下文状态
+- memvid_auto_resume: 手动恢复上次会话上下文
+- memvid_store: 存储长期记忆
+- memvid_search: 搜索长期记忆
+- memvid_save_context: 保存当前对话上下文
+- memvid_quick_save: 快速保存当前对话上下文（自动生成摘要）
+`,
+    }
+  );
+
+  // Register tools handler
+  srv.setRequestHandler(ListToolsRequestSchema, async () => {
+    return {
+      tools: [
       {
         name: "lcm_status",
         description: `[LCM] 查看当前上下文状态`,
@@ -642,9 +660,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 // Prompts Handler - Provide startup context
 // ============================================================================
 
-let startupInfoContent: string = "";
-
-server.setRequestHandler(ListPromptsRequestSchema, async () => {
+srv.setRequestHandler(ListPromptsRequestSchema, async () => {
   return {
     prompts: [
       {
@@ -656,7 +672,7 @@ server.setRequestHandler(ListPromptsRequestSchema, async () => {
   };
 });
 
-server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+srv.setRequestHandler(GetPromptRequestSchema, async (request) => {
   const { name } = request.params;
 
   if (name === "startup_context") {
@@ -680,7 +696,7 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
 // Tools Handler
 // ============================================================================
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+srv.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   if (!memvid) {
@@ -998,6 +1014,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+  return srv;
+}
+
 // ============================================================================
 // Start Server
 // ============================================================================
@@ -1007,6 +1026,9 @@ async function main() {
 
   // Store startup info for prompt retrieval
   startupInfoContent = startupInfo || "无上下文信息。这是一个新的会话。";
+
+  // Create server with startup info in instructions
+  server = setupServer(startupInfoContent);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
