@@ -16,6 +16,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { create, open } from "@memvid/sdk";
 import type { Memvid } from "@memvid/sdk";
@@ -534,6 +536,7 @@ const server = new Server(
   {
     capabilities: {
       tools: {},
+      prompts: {},
     },
   }
 );
@@ -634,6 +637,48 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     ],
   };
 });
+
+// ============================================================================
+// Prompts Handler - Provide startup context
+// ============================================================================
+
+let startupInfoContent: string = "";
+
+server.setRequestHandler(ListPromptsRequestSchema, async () => {
+  return {
+    prompts: [
+      {
+        name: "startup_context",
+        description: "启动时自动加载的上下文和用户偏好",
+        arguments: [],
+      },
+    ],
+  };
+});
+
+server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+  const { name } = request.params;
+
+  if (name === "startup_context") {
+    return {
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: startupInfoContent || "无上下文信息。这是一个新的会话。",
+          },
+        },
+      ],
+    };
+  }
+
+  throw new Error(`Unknown prompt: ${name}`);
+});
+
+// ============================================================================
+// Tools Handler
+// ============================================================================
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
@@ -959,6 +1004,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 async function main() {
   const startupInfo = await initMemvid();
+
+  // Store startup info for prompt retrieval
+  startupInfoContent = startupInfo || "无上下文信息。这是一个新的会话。";
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
