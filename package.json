@@ -1,0 +1,26 @@
+{
+  "name": "mcp-memvid",
+  "version": "1.0.0",
+  "description": "MCP Server for Memvid - Long-term memory for Claude Code",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "mcp-memvid": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": ["mcp", "memvid", "memory", "claude"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@memvid/sdk": "^2.0.159",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@types/node": "^25.5.2",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}
