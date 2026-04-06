@@ -547,11 +547,16 @@ function setupServer(startupInfo: string): Server {
 
 ${startupInfo}
 
+## 重要：当用户问"之前做了什么"或"打开这个窗口前的工作"时
+请使用 memvid_search 工具搜索相关内容，搜索关键词如：
+- "工作记录" 或 "mcp-memvid" 或 "修复" 或 "推送"
+- 或根据用户描述的相关内容进行搜索
+
 ## 可用工具
 - lcm_status: 查看当前上下文状态
 - memvid_auto_resume: 手动恢复上次会话上下文
 - memvid_store: 存储长期记忆
-- memvid_search: 搜索长期记忆
+- memvid_search: 搜索长期记忆（重要！用于查找历史工作）
 - memvid_save_context: 保存当前对话上下文
 - memvid_quick_save: 快速保存当前对话上下文（自动生成摘要）
 `,
