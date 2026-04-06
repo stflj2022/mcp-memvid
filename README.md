@@ -9,24 +9,35 @@ MCP Server for Memvid - 给 Claude Code 提供长期记忆功能。
 - **分类管理**: 按项目、偏好、决策、模式等分类存储
 - **本地存储**: 所有数据保存在本地 `.mv2` 文件中
 
-## 安装
+## 快速安装
 
 ```bash
-cd /home/houwu/mcp-memvid
+# 克隆仓库
+git clone https://github.com/stflj2022/mcp-memvid.git
+cd mcp-memvid
+
+# 安装依赖
 npm install
+
+# 构建
 npm run build
+
+# 运行安装脚本
+chmod +x install.sh
+./install.sh
 ```
 
 ## 配置
 
-Claude Code 配置 (`~/.claude/settings.json`)：
+安装脚本会输出配置信息，将其添加到 `~/.claude.json` 的 `mcpServers` 部分：
 
 ```json
 {
   "mcpServers": {
     "memvid": {
+      "type": "stdio",
       "command": "node",
-      "args": ["/home/houwu/mcp-memvid/dist/index.js"]
+      "args": ["$HOME/.claude/mcp-memvid/dist/index.js"]
     }
   }
 }
@@ -66,3 +77,7 @@ memvid_summary()
 
 - 记忆文件: `~/.claude-memories/claude-memories.mv2`
 - 索引文件: `~/.claude-memories/index.json`
+
+## License
+
+MIT
