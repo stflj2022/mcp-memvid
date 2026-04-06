@@ -5,6 +5,8 @@
  *
  * Provides tools for storing, retrieving, and searching memories
  * across Claude Code sessions using Memvid as the backend.
+ *
+ * Auto-save and Auto-resume features for sudden interruptions.
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -23,6 +25,7 @@ import * as fs from "fs";
 const MEMORY_DIR = path.join(os.homedir(), ".claude-memories");
 const MEMORY_FILE = path.join(MEMORY_DIR, "claude-memories.mv2");
 const MEMORY_INDEX_FILE = path.join(MEMORY_DIR, "index.json");
+const CONTEXT_FILE = path.join(MEMORY_DIR, "current-context.json");
 
 // Ensure directory exists
 if (!fs.existsSync(MEMORY_DIR)) {
@@ -32,10 +35,18 @@ if (!fs.existsSync(MEMORY_DIR)) {
 // In-memory index for tracking metadata
 interface MemoryIndex {
   memories: Record<string, { category: string; tags: string[]; importance: number; timestamp: string; content: string }>;
+  currentContext?: {
+    sessionId: string;
+    timestamp: string;
+    summary: string;
+    topics: string[];
+    lastProjects: string[];
+  };
 }
 
 let memvid: Memvid | null = null;
 let memoryIndex: MemoryIndex = { memories: {} };
+let currentSessionId: string;
 
 // Load or create index
 function loadIndex(): void {
@@ -53,10 +64,25 @@ function saveIndex(): void {
   fs.writeFileSync(MEMORY_INDEX_FILE, JSON.stringify(memoryIndex, null, 2));
 }
 
+// Save current context (for auto-resume)
+function saveContext(summary: string, topics: string[] = [], projects: string[] = []): void {
+  memoryIndex.currentContext = {
+    sessionId: currentSessionId,
+    timestamp: new Date().toISOString(),
+    summary,
+    topics,
+    lastProjects: projects,
+  };
+  saveIndex();
+  fs.writeFileSync(CONTEXT_FILE, JSON.stringify(memoryIndex.currentContext, null, 2));
+}
+
 // Initialize Memvid
-async function initMemvid(): Promise<void> {
+async function initMemvid(): Promise<string | null> {
   try {
     loadIndex();
+
+    currentSessionId = Date.now().toString(36) + Math.random().toString(36).slice(2);
 
     if (fs.existsSync(MEMORY_FILE)) {
       memvid = await open(MEMORY_FILE, "basic");
@@ -65,6 +91,14 @@ async function initMemvid(): Promise<void> {
       memvid = await create(MEMORY_FILE, "basic");
       console.error(`[MCP-Memvid] Created new memory file: ${MEMORY_FILE}`);
     }
+
+    // Return saved context for auto-resume
+    if (memoryIndex.currentContext) {
+      const ctx = memoryIndex.currentContext;
+      console.error(`[MCP-Memvid] Found saved context from ${new Date(ctx.timestamp).toLocaleString()}`);
+      return JSON.stringify(ctx);
+    }
+    return null;
   } catch (error) {
     console.error("[MCP-Memvid] Failed to initialize Memvid:", error);
     throw error;
@@ -84,41 +118,80 @@ const server = new Server(
   }
 );
 
+// Store welcome message for auto-resume
+let autoResumeMessage: string | null = null;
+
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
+        name: "memvid_auto_resume",
+        description: `[AUTO] 检查并恢复之前中断的对话上下文。
+
+服务器启动时自动调用，恢复上次的对话状态。
+包含：会话摘要、讨论主题、最后处理的项目。`,
+        inputSchema: {
+          type: "object",
+          properties: {},
+        },
+      },
+      {
+        name: "memvid_save_context",
+        description: `保存当前对话上下文（用于意外中断后恢复）。
+
+建议在以下情况调用：
+- 完成重要任务后
+- 开始新的复杂任务前
+- 对话长时间暂停前
+
+系统会自动保存：会话摘要、讨论主题、当前项目`,
+        inputSchema: {
+          type: "object",
+          properties: {
+            summary: {
+              type: "string",
+              description: "当前对话摘要（1-2句话）",
+            },
+            topics: {
+              type: "array",
+              items: { type: "string" },
+              description: "当前讨论的主题列表",
+            },
+            projects: {
+              type: "array",
+              items: { type: "string" },
+              description: "当前处理的项目路径或名称",
+            },
+          },
+          required: ["summary"],
+        },
+      },
+      {
         name: "memvid_store",
-        description: `Store a memory with content and optional metadata.
+        description: `存储一条记忆。
 
-The memory will be persisted across Claude Code sessions and can be retrieved later.
-
-Examples:
-- Store code context: "User prefers Rust for systems programming"
-- Store project info: "Project dice-mnemonic is a BIP39 mnemonic generator"
-- Store decisions: "Decided to use frozenEntropy to ensure mnemonic consistency"
-- Store patterns: "User likes concise responses without summaries"`,
+用于保存需要长期记住的信息。`,
         inputSchema: {
           type: "object",
           properties: {
             content: {
               type: "string",
-              description: "The memory content to store",
+              description: "记忆内容",
             },
             category: {
               type: "string",
-              description: "Optional category",
+              description: "分类",
               enum: ["project", "preference", "decision", "pattern", "context", "note"],
             },
             tags: {
               type: "array",
               items: { type: "string" },
-              description: "Optional tags for better retrieval",
+              description: "标签",
             },
             importance: {
               type: "number",
-              description: "Importance score (1-10, default 5)",
+              description: "重要性 (1-10, 默认5)",
               minimum: 1,
               maximum: 10,
             },
@@ -128,28 +201,23 @@ Examples:
       },
       {
         name: "memvid_retrieve",
-        description: `Retrieve memories by category, tags, or recent memories.
-
-Use this to:
-- Load context when starting a new session
-- Recall user preferences
-- Find past decisions or patterns`,
+        description: `按分类或标签检索记忆。`,
         inputSchema: {
           type: "object",
           properties: {
             category: {
               type: "string",
-              description: "Filter by category",
+              description: "分类筛选",
               enum: ["project", "preference", "decision", "pattern", "context", "note"],
             },
             tags: {
               type: "array",
               items: { type: "string" },
-              description: "Filter by tags",
+              description: "标签筛选",
             },
             limit: {
               type: "number",
-              description: "Maximum number of memories to return (default 10)",
+              description: "最大返回数 (默认10)",
               default: 10,
             },
           },
@@ -157,23 +225,17 @@ Use this to:
       },
       {
         name: "memvid_search",
-        description: `Search for memories using natural language or keywords.
-
-Use this to find relevant memories by content.
-Examples:
-- "what did user say about Rust"
-- "decisions about error handling"
-- "preferences for code style"`,
+        description: `搜索记忆内容。`,
         inputSchema: {
           type: "object",
           properties: {
             query: {
               type: "string",
-              description: "Search query",
+              description: "搜索查询",
             },
             limit: {
               type: "number",
-              description: "Maximum results (default 5)",
+              description: "最大结果数 (默认5)",
               default: 5,
             },
           },
@@ -182,26 +244,26 @@ Examples:
       },
       {
         name: "memvid_list",
-        description: "List all stored memories with metadata",
+        description: "列出所有记忆",
         inputSchema: {
           type: "object",
           properties: {
             category: {
               type: "string",
-              description: "Filter by category",
+              description: "分类筛选",
             },
           },
         },
       },
       {
         name: "memvid_delete",
-        description: "Delete a memory by ID",
+        description: "删除记忆",
         inputSchema: {
           type: "object",
           properties: {
             id: {
               type: "string",
-              description: "Memory ID to delete",
+              description: "要删除的记忆ID",
             },
           },
           required: ["id"],
@@ -209,9 +271,7 @@ Examples:
       },
       {
         name: "memvid_summary",
-        description: `Get a summary of all memories for quick context.
-
-Use this at the start of a session to get an overview of stored information.`,
+        description: "获取记忆摘要",
         inputSchema: {
           type: "object",
           properties: {},
@@ -234,6 +294,48 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     switch (name) {
+      case "memvid_auto_resume": {
+        if (!memoryIndex.currentContext) {
+          return {
+            content: [{ type: "text", text: "✅ 没有保存的上下文，这是一个新会话。" }],
+          };
+        }
+
+        const ctx = memoryIndex.currentContext;
+        const timeAgo = Math.floor((Date.now() - new Date(ctx.timestamp).getTime()) / 60000);
+
+        let message = `🔄 恢复上次会话 (${timeAgo}分钟前)\n\n`;
+        message += `📋 摘要: ${ctx.summary}\n`;
+        if (ctx.topics && ctx.topics.length > 0) {
+          message += `🏷️ 主题: ${ctx.topics.join(", ")}\n`;
+        }
+        if (ctx.lastProjects && ctx.lastProjects.length > 0) {
+          message += `📁 项目: ${ctx.lastProjects.join(", ")}\n`;
+        }
+
+        // Also retrieve recent memories
+        const all = Object.entries(memoryIndex.memories);
+        const recent = all.slice(-5);
+        if (recent.length > 0) {
+          message += `\n📝 最近记忆:\n`;
+          recent.forEach(([id, data]) => {
+            message += `  • [${data.category}] ${data.content.substring(0, 50)}...\n`;
+          });
+        }
+
+        return {
+          content: [{ type: "text", text: message }],
+        };
+      }
+
+      case "memvid_save_context": {
+        const { summary, topics = [], projects = [] } = args as any;
+        saveContext(summary, topics, projects);
+        return {
+          content: [{ type: "text", text: "✅ 上下文已保存，意外中断后可恢复" }],
+        };
+      }
+
       case "memvid_store": {
         const { content, category = "note", tags = [], importance = 5 } = args as any;
 
@@ -244,6 +346,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             tags,
             importance,
             timestamp: new Date().toISOString(),
+            sessionId: currentSessionId,
           },
         };
 
@@ -263,7 +366,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: `✅ Memory stored (ID: ${frameId})`,
+              text: `✅ 已存储 (ID: ${frameId})`,
             },
           ],
         };
@@ -294,13 +397,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         if (limited.length === 0) {
           return {
-            content: [{ type: "text", text: "No memories found matching the criteria." }],
+            content: [{ type: "text", text: "没有找到匹配的记忆" }],
           };
         }
 
         const formatted = limited
           .map(([id, data]) => {
-            return `[${id}] ${data.category} ${data.tags.join(",")} (importance: ${data.importance}/10)\n${data.content}`;
+            return `[${id}] ${data.category} ${data.tags.join(",")} (重要性: ${data.importance}/10)\n${data.content}`;
           })
           .join("\n\n");
 
@@ -308,7 +411,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: `📝 Found ${limited.length} memories:\n\n${formatted}`,
+              text: `📝 找到 ${limited.length} 条记忆:\n\n${formatted}`,
             },
           ],
         };
@@ -325,7 +428,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         if (!results.hits || results.hits.length === 0) {
           return {
-            content: [{ type: "text", text: `No memories found for: "${query}"` }],
+            content: [{ type: "text", text: `没有找到: "${query}"` }],
           };
         }
 
@@ -343,7 +446,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: `🔍 Search results for "${query}":\n\n${formatted}`,
+              text: `🔍 搜索结果 "${query}":\n\n${formatted}`,
             },
           ],
         };
@@ -360,7 +463,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         if (results.length === 0) {
           return {
-            content: [{ type: "text", text: "No memories stored yet." }],
+            content: [{ type: "text", text: "还没有存储记忆" }],
           };
         }
 
@@ -375,7 +478,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: `📋 Memories (${results.length} total):\n\n${formatted}`,
+              text: `📋 记忆列表 (${results.length} 条):\n\n${formatted}`,
             },
           ],
         };
@@ -394,7 +497,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: `🗑️ Deleted memory: ${id}`,
+              text: `🗑️ 已删除: ${id}`,
             },
           ],
         };
@@ -414,13 +517,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const recent = all.slice(-3).map(([id, data]) => `  • [${id}] ${data.content.substring(0, 50)}...`).join("\n");
 
+        let summary = `🧠 记忆摘要 (${all.length} 条)\n\n按分类:\n${categorySummary || "  无"}`;
+
+        if (memoryIndex.currentContext) {
+          const ctx = memoryIndex.currentContext;
+          summary += `\n\n💾 当前上下文:\n  ${ctx.summary}`;
+          if (ctx.lastProjects && ctx.lastProjects.length > 0) {
+            summary += `\n  项目: ${ctx.lastProjects.join(", ")}`;
+          }
+        }
+
+        summary += `\n\n最近记忆:\n${recent || "  无"}`;
+
         return {
-          content: [
-            {
-              type: "text",
-              text: `🧠 Memory Summary (${all.length} total)\n\nBy category:\n${categorySummary || "  None"}\n\nRecent memories:\n${recent || "  None yet"}`,
-            },
-          ],
+          content: [{ type: "text", text: summary }],
         };
       }
 
@@ -433,7 +543,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       content: [
         {
           type: "text",
-          text: `❌ Error: ${errorMessage}`,
+          text: `❌ 错误: ${errorMessage}`,
         },
       ],
       isError: true,
@@ -443,12 +553,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 // Start server
 async function main() {
-  await initMemvid();
+  const savedContext = await initMemvid();
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
   console.error("[MCP-Memvid] Server running on stdio");
+
+  // Output auto-resume message for client to pick up
+  if (savedContext) {
+    console.error(`[MCP-Memvid] AUTO_RESUME:${savedContext}`);
+  }
 }
 
 main().catch((error) => {
