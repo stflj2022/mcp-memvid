@@ -5,7 +5,7 @@
  *
  * All data (messages, summaries, memories) stored in a single .mv2 file
  * AUTO-SAVE: Context and preferences are automatically saved
- * AUTO-LOAD: Preferences are automatically loaded on startup
+ * AUTO-LOAD: Context and preferences are automatically loaded on startup
  *
  * Based on LCM paper: https://papers.voltropy.com/LCM
  * Inspired by: https://github.com/Martian-Engineering/lossless-claw
@@ -18,7 +18,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { create, open } from "@memvid/sdk";
-import type { Memvid, PutInput, FindInput } from "@memvid/sdk";
+import type { Memvid } from "@memvid/sdk";
 import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
@@ -64,15 +64,18 @@ interface UserPreference {
   timestamp: string;
 }
 
+interface ContextSnapshot {
+  sessionId: string;
+  timestamp: string;
+  summary: string;
+  topics: string[];
+  lastProjects: string[];
+  preferences?: UserPreference[];
+  messageCount?: number;
+}
+
 interface ContextCache {
-  currentContext?: {
-    sessionId: string;
-    timestamp: string;
-    summary: string;
-    topics: string[];
-    lastProjects: string[];
-    preferences?: UserPreference[];
-  };
+  currentContext?: ContextSnapshot;
   messageCount?: number;
   summaryCount?: number;
   lastSyncTime?: string;
@@ -87,7 +90,7 @@ let currentSessionId: string;
 let contextCache: ContextCache = {};
 let autoSaveEnabled: boolean = true;
 let lastAutoSaveTime: number = 0;
-let activityCounter: number = 0; // Track activity for auto-save
+let activityCounter: number = 0;
 let autoSaveTimer: NodeJS.Timeout | null = null;
 
 // ============================================================================
@@ -108,7 +111,7 @@ function saveContextCache(): void {
   try {
     fs.writeFileSync(CONTEXT_CACHE_FILE, JSON.stringify(contextCache, null, 2));
   } catch (e) {
-    // Ignore cache write errors
+    console.error("[MCP-Memvid] Failed to save context cache:", e);
   }
 }
 
@@ -117,9 +120,21 @@ function loadContextCache(): void {
     try {
       contextCache = JSON.parse(fs.readFileSync(CONTEXT_CACHE_FILE, "utf-8"));
     } catch (e) {
+      console.error("[MCP-Memvid] Failed to load context cache:", e);
       contextCache = {};
     }
   }
+}
+
+/**
+ * Clean up snippet by removing metadata lines
+ */
+function cleanSnippet(snippet: string): string {
+  // Remove everything after metadata markers
+  const parts = snippet.split(/\ntitle:|^\n?labels:|^\n?category:|^\n?extractous_metadata:|^\n?importance:|^\n?sessionId:|^\n?tags:|^\n?timestamp:|^\n?type:/m);
+  let cleaned = parts[0];
+  // Clean up extra whitespace
+  return cleaned.trim();
 }
 
 /**
@@ -157,57 +172,122 @@ async function performAutoSave(): Promise<void> {
 /**
  * Load and display user preferences on startup
  */
-async function loadAndDisplayPreferences(): Promise<string> {
-  if (!memvid) return "";
+async function loadAndDisplayPreferences(): Promise<UserPreference[]> {
+  if (!memvid) return [];
 
   try {
-    const results = await memvid.find("type:memory label:preference", { mode: "lex" });
+    const results = await memvid.find("preference", { mode: "auto" });
     const prefs: UserPreference[] = [];
 
     if (results.hits) {
       for (const hit of results.hits) {
         if (hit.snippet) {
-          prefs.push({
-            id: hit.frame_id.toString(),
-            content: hit.snippet,
-            category: "preference",
-            tags: [],
-            importance: 5,
-            timestamp: new Date().toISOString(),
-          });
+          const content = cleanSnippet(hit.snippet);
+          // Skip duplicates
+          if (!prefs.some(p => p.content === content)) {
+            prefs.push({
+              id: hit.frame_id.toString(),
+              content: content,
+              category: "preference",
+              tags: [],
+              importance: 5,
+              timestamp: new Date().toISOString(),
+            });
+          }
         }
       }
     }
 
-    if (prefs.length > 0) {
-      // Save to context cache for auto-resume
-      if (!contextCache.currentContext) {
-        contextCache.currentContext = {
-          sessionId: currentSessionId,
-          timestamp: new Date().toISOString(),
-          summary: "",
-          topics: [],
-          lastProjects: [],
-          preferences: prefs,
-        };
-      } else {
-        contextCache.currentContext.preferences = prefs;
-      }
-      saveContextCache();
-
-      let output = "\n📋 用户偏好规则 (自动加载):\n\n";
-      for (const pref of prefs) {
-        output += `• ${pref.content}\n`;
-      }
-      output += "\n";
-
-      return output;
-    }
+    return prefs;
   } catch (e) {
     console.error("[MCP-Memvid] Error loading preferences:", e);
+    return [];
+  }
+}
+
+/**
+ * Parse metadata from snippet
+ * Metadata is stored as JSON in the snippet after special markers
+ */
+function parseMetadataFromSnippet(snippet: string): Record<string, any> | null {
+  try {
+    // Look for JSON metadata at the end of snippet
+    // Format: ... content ...\n\n__METADATA__: {json}
+    const match = snippet.match(/\n\n__METADATA__:\s*(\{.*?\})\s*$/s);
+    if (match) {
+      return JSON.parse(match[1]);
+    }
+  } catch (e) {
+    // Ignore parse errors
+  }
+  return null;
+}
+
+/**
+ * Load the latest context snapshot from .mv2 file
+ */
+async function loadLatestContextFromMemvid(): Promise<ContextSnapshot | null> {
+  if (!memvid) return null;
+
+  try {
+    // Search for context snapshots
+    const results = await memvid.find("context-snapshot", { mode: "auto" });
+
+    if (!results.hits || results.hits.length === 0) {
+      return null;
+    }
+
+    // Get the most recent context snapshot using created_at
+    let latestHit = results.hits[0];
+    let latestTime = new Date(latestHit.created_at).getTime();
+
+    for (const hit of results.hits) {
+      const hitTime = new Date(hit.created_at).getTime();
+      if (hitTime > latestTime) {
+        latestTime = hitTime;
+        latestHit = hit;
+      }
+    }
+
+    if (latestHit) {
+      // Extract summary (remove "Context: " prefix)
+      const fullText = latestHit.snippet || "";
+      let summary = fullText.replace(/^Context:\s*/, "");
+
+      // Parse metadata if available
+      const meta = parseMetadataFromSnippet(fullText);
+
+      // Clean up summary (remove metadata part if present)
+      summary = summary.split(/\n\n__METADATA__:/)[0].trim();
+
+      return {
+        sessionId: meta?.sessionId || "unknown",
+        timestamp: meta?.timestamp || latestHit.created_at,
+        summary: summary || "无摘要",
+        topics: meta?.topics || [],
+        lastProjects: meta?.projects || [],
+        messageCount: meta?.messageCount,
+      };
+    }
+  } catch (e) {
+    console.error("[MCP-Memvid] Error loading context from Memvid:", e);
   }
 
-  return "";
+  return null;
+}
+
+/**
+ * Format preferences for display
+ */
+function formatPreferences(prefs: UserPreference[]): string {
+  if (prefs.length === 0) return "";
+
+  let output = "📋 用户偏好规则:\n\n";
+  for (const pref of prefs) {
+    output += `• ${pref.content}\n`;
+  }
+  output += "\n";
+  return output;
 }
 
 // ============================================================================
@@ -377,31 +457,65 @@ async function initMemvid(): Promise<string | null> {
       memvid = await open(MEMORY_FILE, "basic");
       console.error(`[MCP-Memvid] Opened: ${MEMORY_FILE}`);
 
-      const summaryResults = await memvid!.find("type:summary", { mode: "lex" });
+      const summaryResults = await memvid!.find("summary", { mode: "auto" });
       contextCache.summaryCount = summaryResults.hits?.length || 0;
     } else {
       memvid = await create(MEMORY_FILE, "basic");
       console.error(`[MCP-Memvid] Created: ${MEMORY_FILE}`);
     }
 
-    // Load and display preferences
-    const prefsOutput = await loadAndDisplayPreferences();
+    // Load preferences first
+    const prefs = await loadAndDisplayPreferences();
 
-    if (contextCache.currentContext) {
+    // Try to load latest context from Memvid
+    const memvidContext = await loadLatestContextFromMemvid();
+
+    let output = "";
+
+    if (memvidContext) {
+      // Found context in Memvid
+      const timeAgo = Math.floor((Date.now() - new Date(memvidContext.timestamp).getTime()) / 60000);
+      output += `🔄 恢复上次会话 (${timeAgo}分钟前)\n\n`;
+      output += `📋 摘要: ${memvidContext.summary}\n`;
+
+      if (memvidContext.topics && memvidContext.topics.length > 0) {
+        output += `🏷️  主题: ${memvidContext.topics.join(", ")}\n`;
+      }
+
+      if (memvidContext.lastProjects && memvidContext.lastProjects.length > 0) {
+        output += `📁 项目: ${memvidContext.lastProjects.join(", ")}\n`;
+      }
+
+      // Update current context in cache
+      contextCache.currentContext = {
+        ...memvidContext,
+        preferences: prefs,
+      };
+    } else if (contextCache.currentContext) {
+      // Fall back to cache file
       const ctx = contextCache.currentContext;
-      let resumeInfo = `🔄 恢复上次会话 (${Math.floor((Date.now() - new Date(ctx.timestamp).getTime()) / 60000)}分钟前)\n\n`;
-      resumeInfo += `📋 摘要: ${ctx.summary}\n`;
-      if (ctx.topics && ctx.topics.length > 0) resumeInfo += `🏷️ 主题: ${ctx.topics.join(", ")}\n`;
-      resumeInfo += prefsOutput;
-      return resumeInfo;
+      const timeAgo = Math.floor((Date.now() - new Date(ctx.timestamp).getTime()) / 60000);
+      output += `🔄 恢复缓存会话 (${timeAgo}分钟前)\n\n`;
+      output += `📋 摘要: ${ctx.summary}\n`;
+
+      if (ctx.topics && ctx.topics.length > 0) {
+        output += `🏷️  主题: ${ctx.topics.join(", ")}\n`;
+      }
+
+      // Update preferences in cache
+      contextCache.currentContext.preferences = prefs;
+    } else {
+      // New session
+      output += `🆕 新会话\n`;
     }
 
-    // New session but still show preferences if any
-    if (prefsOutput) {
-      return "🆕 新会话\n\n" + prefsOutput;
+    // Always show preferences
+    if (prefs.length > 0) {
+      output += "\n" + formatPreferences(prefs);
     }
 
-    return null;
+    saveContextCache();
+    return output;
   } catch (error) {
     console.error("[MCP-Memvid] Init error:", error);
     throw error;
@@ -581,14 +695,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (summaryCount === 0) {
           result = { content: [{ type: "text", text: "还没有摘要" }] };
         } else {
-          const results = await memvid.find("type:summary", { mode: "lex" });
+          const results = await memvid.find("summary", { mode: "auto" });
           let output = `📋 摘要列表 (${summaryCount} 个)\n\n`;
 
           if (results.hits && results.hits.length > 0) {
             for (const hit of results.hits.slice(0, 10)) {
+              const snippet = hit.snippet || "无内容";
+              const cleaned = cleanSnippet(snippet);
               output += `• [${hit.frame_id}]\n`;
-              output += `  ${hit.title || "无标题"}\n`;
-              output += `  ${hit.snippet?.substring(0, 80)}...\n\n`;
+              output += `  ${cleaned.substring(0, 80)}...\n\n`;
             }
           }
 
@@ -602,7 +717,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "lcm_search": {
         const { query } = args as any;
-        const results = await memvid.find(query, { mode: "lex" });
+        const results = await memvid.find(query, { mode: "auto" });
 
         let output = `🔍 搜索: "${query}"\n\n`;
 
@@ -611,10 +726,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         } else {
           output += `找到 ${results.hits.length} 条结果:\n\n`;
           for (const hit of results.hits.slice(0, 10)) {
+            const snippet = hit.snippet || "无内容";
+            const cleaned = cleanSnippet(snippet);
             output += `• [${hit.frame_id}]\n`;
-            if (hit.title) output += `  标题: ${hit.title}\n`;
-            if (hit.snippet) output += `  ${hit.snippet.substring(0, 100)}...\n`;
-            output += `\n`;
+            output += `  ${cleaned.substring(0, 100)}...\n\n`;
           }
         }
         result = { content: [{ type: "text", text: output }] };
@@ -622,37 +737,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "memvid_auto_resume": {
-        if (!contextCache.currentContext) {
-          result = {
-            content: [{ type: "text", text: "✅ 没有保存的上下文，这是一个新会话。" }],
-          };
-        } else {
-          const ctx = contextCache.currentContext;
-          const timeAgo = Math.floor((Date.now() - new Date(ctx.timestamp).getTime()) / 60000);
+        // Reload context from Memvid
+        const memvidContext = await loadLatestContextFromMemvid();
+        const prefs = await loadAndDisplayPreferences();
+
+        if (memvidContext) {
+          const timeAgo = Math.floor((Date.now() - new Date(memvidContext.timestamp).getTime()) / 60000);
 
           let output = `🔄 恢复上次会话 (${timeAgo}分钟前)\n\n`;
-          output += `📋 摘要: ${ctx.summary}\n`;
+          output += `📋 摘要: ${memvidContext.summary}\n`;
 
-          if (ctx.topics && ctx.topics.length > 0) {
-            output += `🏷️  主题: ${ctx.topics.join(", ")}\n`;
+          if (memvidContext.topics && memvidContext.topics.length > 0) {
+            output += `🏷️  主题: ${memvidContext.topics.join(", ")}\n`;
           }
 
-          if (ctx.lastProjects && ctx.lastProjects.length > 0) {
-            output += `📁 项目: ${ctx.lastProjects.join(", ")}\n`;
+          if (memvidContext.lastProjects && memvidContext.lastProjects.length > 0) {
+            output += `📁 项目: ${memvidContext.lastProjects.join(", ")}\n`;
           }
 
-          // Show preferences if available
-          if (ctx.preferences && ctx.preferences.length > 0) {
-            output += `\n📋 用户偏好:\n`;
-            for (const pref of ctx.preferences) {
-              output += `• ${pref.content}\n`;
-            }
+          // Update cache
+          contextCache.currentContext = {
+            ...memvidContext,
+            preferences: prefs,
+          };
+          saveContextCache();
+
+          if (prefs.length > 0) {
+            output += "\n" + formatPreferences(prefs);
           }
 
           const status = getStatus();
           output += `\n📊 当前状态:\n  消息: ${status.messageCount}\n  摘要: ${status.summaryCount}`;
 
           result = { content: [{ type: "text", text: output }] };
+        } else {
+          result = {
+            content: [{ type: "text", text: "✅ 没有保存的上下文，这是一个新会话。" + (prefs.length > 0 ? "\n\n" + formatPreferences(prefs) : "") }],
+          };
         }
         break;
       }
@@ -660,35 +781,47 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "memvid_save_context": {
         const { summary, topics = [], projects = [] } = args as any;
 
-        contextCache.currentContext = {
+        const contextSnapshot: ContextSnapshot = {
           sessionId: currentSessionId,
           timestamp: new Date().toISOString(),
           summary,
           topics,
           lastProjects: projects,
+          messageCount: sessionTracker.count(),
         };
+
+        // Update cache
+        contextCache.currentContext = contextSnapshot;
         saveContextCache();
 
+        // Create metadata JSON to embed in text
+        const metadata = {
+          sessionId: currentSessionId,
+          timestamp: new Date().toISOString(),
+          topics,
+          projects,
+          messageCount: sessionTracker.count(),
+        };
+
+        // Save to Memvid with metadata embedded in text
+        const textContent = `Context: ${summary}\n\n__METADATA__: ${JSON.stringify(metadata)}`;
         await memvid.put({
-          text: `Context: ${summary}`,
+          text: textContent,
           metadata: {
             type: "context-snapshot",
-            timestamp: new Date().toISOString(),
-            topics,
-            projects,
           },
           labels: ["context", "current"],
         });
 
         result = {
-          content: [{ type: "text", text: "✅ 上下文已保存，意外中断后可恢复" }],
+          content: [{ type: "text", text: `✅ 上下文已保存到 Memvid\n\n📋 摘要: ${summary}\n🏷️ 主题: ${topics.join(", ") || "无"}\n📁 项目: ${projects.join(", ") || "无"}` }],
         };
         break;
       }
 
       case "memvid_quick_save": {
         const messages = sessionTracker.getAll().slice(-10);
-        let autoSummary = "当前对话";
+        let autoSummary = "进行中的对话";
 
         if (messages.length > 0) {
           const lastMsg = messages[messages.length - 1];
@@ -698,28 +831,40 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const autoTopics = extractTopics(messages.map(m => ({ content: m.content })));
 
-        contextCache.currentContext = {
+        const contextSnapshot: ContextSnapshot = {
           sessionId: currentSessionId,
           timestamp: new Date().toISOString(),
-          summary: autoSummary || "进行中的对话",
+          summary: autoSummary,
           topics: autoTopics,
           lastProjects: [],
+          messageCount: sessionTracker.count(),
         };
+
+        // Update cache
+        contextCache.currentContext = contextSnapshot;
         saveContextCache();
 
+        // Create metadata JSON to embed in text
+        const metadata = {
+          sessionId: currentSessionId,
+          timestamp: new Date().toISOString(),
+          topics: autoTopics,
+          autoGenerated: true,
+          messageCount: sessionTracker.count(),
+        };
+
+        // Save to Memvid with metadata embedded in text
+        const textContent = `Context: ${autoSummary}\n\n__METADATA__: ${JSON.stringify(metadata)}`;
         await memvid.put({
-          text: `Context: ${autoSummary}`,
+          text: textContent,
           metadata: {
             type: "context-snapshot",
-            timestamp: new Date().toISOString(),
-            topics: autoTopics,
-            autoGenerated: true,
           },
           labels: ["context", "current", "auto"],
         });
 
         result = {
-          content: [{ type: "text", text: `✅ 已自动保存上下文\n\n📋 摘要: ${autoSummary}\n🏷️ 主题: ${autoTopics.join(", ") || "无"}` }],
+          content: [{ type: "text", text: `✅ 已自动保存上下文到 Memvid\n\n📋 摘要: ${autoSummary}\n🏷️ 主题: ${autoTopics.join(", ") || "无"}` }],
         };
         break;
       }
@@ -742,8 +887,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // If storing a preference, reload and cache it
         if (category === "preference") {
-          const prefs = await loadAndDisplayPreferences();
-          console.error("[MCP-Memvid] Preference saved and cached");
+          await loadAndDisplayPreferences();
+          console.error("[MCP-Memvid] Preference saved and reloaded");
         }
 
         result = {
@@ -755,7 +900,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "memvid_search": {
         const { query, limit = 5 } = args as any;
 
-        const results = await memvid.find(`type:memory ${query}`, { mode: "lex" });
+        const results = await memvid.find(query, { mode: "auto" });
 
         if (!results.hits || results.hits.length === 0) {
           result = { content: [{ type: "text", text: `没有找到: "${query}"` }] };
@@ -763,11 +908,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           let output = `🔍 搜索结果 "${query}":\n\n`;
 
           for (const hit of results.hits.slice(0, limit)) {
+            const snippet = hit.snippet || "无内容";
+            const cleaned = cleanSnippet(snippet);
             output += `• [${hit.frame_id}]\n`;
-            if (hit.snippet) {
-              output += `  ${hit.snippet}\n`;
-            }
-            output += `\n`;
+            output += `  ${cleaned}\n\n`;
           }
           result = { content: [{ type: "text", text: output }] };
         }
@@ -814,17 +958,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // ============================================================================
 
 async function main() {
-  const savedContext = await initMemvid();
+  const startupInfo = await initMemvid();
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
   console.error("[MCP-Memvid] Server running on stdio");
   console.error("[MCP-Memvid] Auto-save ENABLED - Context saved every 30s");
-  console.error("[MCP-Memvid] Auto-load ENABLED - Preferences loaded on startup");
+  console.error("[MCP-Memvid] Auto-load ENABLED - Context and preferences loaded on startup");
 
-  if (savedContext) {
-    console.error(`[MCP-Memvid] AUTO_RESUME:${savedContext}`);
+  if (startupInfo) {
+    console.error(`[MCP-Memvid] STARTUP_INFO:${startupInfo}`);
   }
 
   // Start auto-save interval
