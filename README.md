@@ -1,36 +1,36 @@
-# MCP-Memvid
+# MCP-Memvid with LCM
 
-MCP Server for Memvid - 给 Claude Code 提供长期记忆功能。
+MCP Server for Memvid - 给 Claude Code 提供长期记忆和**无损上下文管理**功能。
 
 ## ✨ 特性
 
+### 长期记忆
 - **跨会话记忆**: 在不同 Claude Code 窗口间共享记忆
-- **自动恢复**: 突然中断后，新窗口自动恢复上下文
 - **语义搜索**: 使用自然语言查找相关记忆
 - **分类管理**: 按项目、偏好、决策、模式等分类存储
-- **本地存储**: 所有数据保存在本地 `.mv2` 文件中
+
+### LCM (Lossless Context Management)
+- **自动压缩**: 对话超过阈值时自动摘要旧消息
+- **分层摘要**: 多级摘要形成 DAG 结构
+- **无损恢复**: 可展开任意摘要恢复原始对话
+- **智能检索**: 根据当前需求检索相关历史
+
+基于 [LCM 论文](https://papers.voltropy.com/LCM) 和 [lossless-claw](https://github.com/Martian-Engineering/lossless-claw) 项目。
 
 ## 🚀 快速安装
 
 ```bash
-# 克隆仓库
 git clone https://github.com/stflj2022/mcp-memvid.git
 cd mcp-memvid
-
-# 安装依赖
 npm install
-
-# 构建
 npm run build
-
-# 运行安装脚本
 chmod +x install.sh
 ./install.sh
 ```
 
 ## ⚙️ 配置
 
-安装脚本会输出配置信息，将其添加到 `~/.claude.json` 的 `mcpServers` 部分：
+将以下内容添加到 `~/.claude.json` 的 `mcpServers` 部分：
 
 ```json
 {
@@ -46,68 +46,114 @@ chmod +x install.sh
 
 ## 🛠️ 工具
 
+### LCM 工具
+
+| 工具 | 描述 |
+|------|------|
+| `lcm_status` | 查看上下文状态和压缩建议 |
+| `lcm_compact` | 执行上下文压缩 |
+| `lcm_expand` | 展开摘要恢复详情 |
+| `lcm_list_summaries` | 列出所有摘要 |
+| `lcm_search` | 在消息和摘要中搜索 |
+
+### 记忆工具
+
 | 工具 | 描述 |
 |------|------|
 | `memvid_auto_resume` | 自动恢复上次中断的对话 |
 | `memvid_save_context` | 保存当前对话上下文 |
-| `memvid_store` | 存储记忆 |
-| `memvid_retrieve` | 按分类/标签检索 |
-| `memvid_search` | 语义搜索 |
-| `memvid_list` | 列出所有记忆 |
-| `memvid_delete` | 删除记忆 |
-| `memvid_summary` | 获取摘要 |
+| `memvid_store` | 存储长期记忆 |
+| `memvid_search` | 搜索长期记忆 |
+| `memvid_summary` | 获取记忆摘要 |
 
 ## 📖 使用示例
 
+### 查看上下文状态
+
+```
+lcm_status()
+```
+
+输出：
+```
+📊 LCM 状态
+
+📝 消息: 150 条
+📦 摘要: 3 个
+🔤 估算 tokens: 180000
+🎯 上下文阈值: 150000 (75%)
+
+⚠️  建议执行压缩: lcm_compact()
+   可压缩约 86 条消息
+```
+
+### 执行压缩
+
+```
+lcm_compact()
+```
+
+或强制压缩：
+```
+lcm_compact(force=true)
+```
+
+### 展开摘要
+
+```
+lcm_expand(summaryId="abc123...")
+```
+
+### 搜索历史
+
+```
+lcm_search(query="dice-memonic bug")
+```
+
 ### 自动恢复（中断后继续）
 
-新窗口打开时：
 ```
 memvid_auto_resume()
 ```
 
-输出示例：
-```
-🔄 恢复上次会话 (15分钟前)
-
-📋 摘要: 正在开发 dice-mnemonic 项目，修复了 frozenEntropy 问题
-🏷️ 主题: rust, crypto, bip39
-📁 项目: dice-mnemonic
-
-📝 最近记忆:
-  • [project] dice-mnemonic 是基于物理骰子的 BIP39 助记词生成器...
-  • [decision] 使用 frozenEntropy 确保助记词生成后的一致性...
-```
-
-### 保存上下文（防止中断丢失）
+## 💡 工作原理
 
 ```
-memvid_save_context(
-  summary="正在开发 dice-mnemonic，刚修复了继续添加骰子后助记词不变的bug",
-  topics=["rust", "crypto", "bip39"],
-  projects=["/home/houwu/dice-mnemonic"]
-)
+┌─────────────────────────────────────────────────────┐
+│                  当前会话上下文                      │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐   │
+│  │ 摘要A   │ │ 摘要B   │ │ 旧消息  │ │ 新消息  │   │
+│  │ (DAG)   │ │ (DAG)   │ │(保护区) │ │(活动区) │   │
+│  └────┬────┘ └────┬────┘ └─────────┘ └─────────┘   │
+│       │            │                                │
+│       ▼            ▼                                │
+│  [原始消息]    [原始消息]                            │
+│       │            │                                │
+│       └────────────┴────────────────────────────┐   │
+│                   │                               │   │
+│                   ▼                               │   │
+└───────────────────┼───────────────────────────────┘
+                    │
+                    ▼
+              ┌─────────────┐
+              │   Memvid    │
+              │  (.mv2)     │
+              └─────────────┘
 ```
 
-### 存储长期记忆
+### 压缩流程
 
-```
-# 存储用户偏好
-memvid_store(content="用户喜欢简洁的回答，不需要总结", category="preference", importance=7)
+1. **触发条件**: 上下文达到 75% 阈值且消息数 > 20
+2. **保护机制**: 最近 64 条消息不被压缩
+3. **摘要生成**: 按主题分组，提取关键点和决策
+4. **DAG 构建**: 摘要可链接回源消息，支持递归压缩
 
-# 存储项目信息
-memvid_store(content="dice-mnemonic 是基于物理骰子的 BIP39 助记词生成器", category="project", tags=["rust", "crypto"])
+### 恢复流程
 
-# 存储技术决策
-memvid_store(content="使用 frozenEntropy 确保助记词生成后的一致性，添加骰子时重置", category="decision", importance=8)
-```
-
-### 搜索记忆
-
-```
-memvid_search(query="用户偏好什么")
-memvid_search(query="dice-memonic 的决策")
-```
+1. 中断后打开新窗口
+2. `memvid_auto_resume()` 恢复上下文
+3. `lcm_expand()` 展开需要的摘要
+4. 继续工作
 
 ## 📂 数据位置
 
@@ -115,37 +161,18 @@ memvid_search(query="dice-memonic 的决策")
 ~/.claude-memories/
 ├── claude-memories.mv2   # Memvid 数据库
 ├── index.json            # 记忆索引
-└── current-context.json  # 当前上下文（自动恢复用）
+├── current-context.json  # 当前上下文
+└── lcm-state.json        # LCM 状态（消息、摘要）
 ```
 
-## 💡 工作流程
+## 🎯 解决的问题
 
-```
-┌─────────────────┐
-│  开始对话        │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐     重要节点      ┌──────────────┐
-│  工作中...      │ ─────────────────▶│ save_context │
-│                 │                   │ 保存上下文   │
-└────────┬────────┘                   └──────────────┘
-         │
-         ▼                    意外中断/关闭窗口
-┌─────────────────┐
-│   中断 ❌       │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  新窗口打开     │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ auto_resume()   │ ───▶ 恢复上下文 ✓
-└─────────────────┘
-```
+| 问题 | 解决方案 |
+|------|----------|
+| 上下文超限中断 | LCM 自动压缩，延长单次会话 |
+| 中断后无法继续 | `memvid_auto_resume()` 恢复上下文 |
+| 旧对话丢失 | 无损摘要，可随时展开查看 |
+| 跨会话记忆 | Memvid 长期存储 + 语义搜索 |
 
 ## 📄 License
 
